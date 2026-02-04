@@ -1,6 +1,6 @@
-# PDF 智慧切割器 (單檔版)
+# PDF 智慧切割器
 
-一個完全在瀏覽器內運行的 PDF 切割工具，結合 Google Gemini AI 提供智慧章節建議與內容摘要功能。
+一個完全在瀏覽器內運行的 PDF 工具，支援切割、合併與 Google Gemini AI 摘要功能。
 
 ---
 
@@ -12,13 +12,19 @@
 | **範圍切割** | 指定起始頁與結束頁，提取連續頁面為單一 PDF |
 | **獨立頁面切割** | 輸入多個頁碼（逗號分隔），分別切割並打包成 ZIP |
 
+### 🧩 PDF 合併功能
+| 功能 | 說明 |
+|------|------|
+| **多檔合併** | 支援多個 PDF 上傳，依上傳順序合併成單一 PDF |
+| **選頁合併** | 從單一 PDF 指定頁碼清單或範圍，合併成單一 PDF |
+
 ### 🤖 AI 智慧功能
 | 功能 | 說明 |
 |------|------|
 | **AI 摘要指定頁面** | 支援單頁 (`1, 3, 5`) 或連續頁 (`1-5`) 格式，摘要指定頁面的完整內容 |
 
 ### 🔒 隱私保護
-- **完全本地處理**：PDF 切割操作在瀏覽器內完成，檔案不會上傳至伺服器
+- **完全本地處理**：PDF 切割與合併在瀏覽器內完成，檔案不會上傳至伺服器
 - **AI 功能僅傳輸文字**：僅將提取的文字片段傳送至 Google Gemini API
 
 ---
@@ -42,7 +48,7 @@
 ### AI 整合
 | 服務 | 用途 |
 |------|------|
-| Google Gemini API | 章節偵測、內容摘要 |
+| Google Gemini API | 內容摘要 |
 
 ---
 
@@ -54,12 +60,14 @@
 const [pdfFile, setPdfFile] = useState(null);     // 原始 PDF 檔案
 const [pdfDoc, setPdfDoc] = useState(null);       // pdf-lib 文件物件
 const [pageCount, setPageCount] = useState(0);    // 總頁數
-const [mode, setMode] = useState('range');        // 模式：'range' | 'individual' | 'summary'
+const [mode, setMode] = useState('range');        // 模式：'range' | 'individual' | 'merge-pages' | 'merge-files' | 'summary'
 
 // 輸入狀態
 const [rangeStart, setRangeStart] = useState(''); // 範圍起始頁
 const [rangeEnd, setRangeEnd] = useState('');     // 範圍結束頁
 const [individualPages, setIndividualPages] = useState(''); // 獨立頁碼
+const [mergePagesInput, setMergePagesInput] = useState(''); // 選頁合併頁碼
+const [mergeFiles, setMergeFiles] = useState([]); // 多檔合併檔案
 
 // AI 相關
 const [userApiKey, setUserApiKey] = useState('');     // Gemini API Key
@@ -84,7 +92,17 @@ const [statusMsg, setStatusMsg] = useState({ type: '', text: '' }); // 狀態訊
 - 使用 `pdf-lib` 載入 PDF
 - 取得總頁數並初始化輸入欄位
 
-#### 2. `extractTextByPages(pageNumbers)` - 指定頁碼文字提取
+#### 2. `parsePageInput(input, maxPage)` - 頁碼解析（共用）
+```
+用途：解析使用者輸入的頁碼字串，保序去重並檢查範圍
+支援格式：
+  - 單頁："1, 3, 5"
+  - 連續頁："1-5"
+  - 混合："1-3, 7, 10-12"
+回傳：pages / invalidTokens / outOfRange
+```
+
+#### 3. `extractTextByPages(pageNumbers)` - 指定頁碼文字提取
 ```
 用途：根據指定頁碼陣列提取完整文字（供摘要使用）
 參數：pageNumbers - 頁碼陣列（可不連續）
@@ -93,23 +111,9 @@ const [statusMsg, setStatusMsg] = useState({ type: '', text: '' }); // 狀態訊
 - 使用 `PDF.js` 提取文字內容
 - 取整頁所有文字（無字數限制）
 
-#### 3. `parsePageInput(input)` - 頁碼解析（內嵌於 handleAiSummarize）
-```
-用途：解析使用者輸入的頁碼字串
-支援格式：
-  - 單頁："1, 3, 5" → [1, 3, 5]
-  - 連續頁："1-5" → [1, 2, 3, 4, 5]
-  - 混合："1-3, 7, 10-12" → [1, 2, 3, 7, 10, 11, 12]
-```
-
 #### 4. `handleAiSummarize()` - AI 內容摘要
 ```
-流程：
-1. 使用 parsePageInput 解析頁碼輸入
-2. 檢查頁數限制（最多 10 頁，超過則提示使用者）
-3. 使用 extractTextByPages 提取完整文字
-4. 傳送至 Gemini API 請求摘要
-5. 顯示摘要結果
+流程：解析頁碼 → 檢查頁數限制 → 提取文字 → 呼叫 Gemini API → 顯示摘要
 ```
 
 #### 5. `handleSplit()` - 執行切割
@@ -126,7 +130,17 @@ const [statusMsg, setStatusMsg] = useState({ type: '', text: '' }); // 狀態訊
   4. 下載 ZIP 檔案
 ```
 
-#### 6. `downloadBlob(data, name, mimeType)` - 檔案下載
+#### 6. `handleMergeFiles()` - 多檔合併
+```
+流程：逐檔載入 PDF → 依上傳順序複製頁面 → 儲存並下載單一 PDF
+```
+
+#### 7. `handleMergePages()` - 選頁合併
+```
+流程：解析頁碼 → 驗證範圍 → 依輸入順序合併頁面 → 下載單一 PDF
+```
+
+#### 8. `downloadBlob(data, name, mimeType)` - 檔案下載
 ```
 流程：Blob → URL.createObjectURL → 觸發下載 → 清理 URL
 ```
@@ -146,20 +160,22 @@ PDFSplitter (主元件)
 │   └── 模型選擇下拉選單
 │
 ├── 主內容區
-│   ├── [未上傳] 拖放上傳區
-│   └── [已上傳] 切割控制面板
-│       ├── 檔案資訊卡
-│       ├── 模式切換標籤 (三個 Tab)
-│       │   ├── 範圍切割
-│       │   ├── 獨立頁面
-│       │   └── AI 摘要 (紫色)
-│       ├── 輸入區域
-│       │   ├── [範圍模式] 起始頁/結束頁
-│       │   ├── [獨立模式] 頁碼輸入
-│       │   └── [摘要模式] 頁碼輸入 + 執行摘要按鈕
-│       ├── AI 回應區域
-│       ├── 狀態訊息 (成功/錯誤)
-│       └── 下載按鈕 (僅在切割模式顯示)
+│   ├── 模式切換標籤 (五個 Tab)
+│   │   ├── 範圍切割
+│   │   ├── 獨立頁面
+│   │   ├── 選頁合併
+│   │   ├── 多檔合併
+│   │   └── AI 摘要
+│   ├── 檔案資訊卡（非多檔合併模式）
+│   ├── 輸入區域
+│   │   ├── [範圍模式] 起始頁/結束頁
+│   │   ├── [獨立模式] 頁碼輸入
+│   │   ├── [選頁合併] 頁碼輸入
+│   │   ├── [多檔合併] 多檔上傳 + 檔案順序列表
+│   │   └── [摘要模式] 頁碼輸入 + 執行摘要按鈕
+│   ├── AI 回應區域
+│   ├── 狀態訊息 (成功/錯誤)
+│   └── 下載按鈕（依模式顯示/隱藏）
 │
 └── 頁尾 (隱私說明)
 ```
@@ -213,13 +229,13 @@ const aiText = data.candidates?.[0]?.content?.parts?.[0]?.text;
 
 ## 🚀 使用方式
 
-1. 直接在瀏覽器開啟 `pdf smart splitter.html`
-2. （可選）點擊「設定 Key」輸入 Gemini API Key 以啟用 AI 功能
-3. 上傳 PDF 檔案
-4. 選擇切割模式：
-   - **範圍切割**：輸入起始頁與結束頁
-   - **獨立頁面**：輸入頁碼（逗號分隔）或點擊「AI 自動建議」
-5. 點擊下載按鈕取得切割後的檔案
+1. 直接在瀏覽器開啟 `index.html`
+2. （可選）點擊「AI 設定」輸入 Gemini API Key 以啟用 AI 功能
+3. 選擇功能模式：
+   - **範圍切割 / 獨立頁面 / 選頁合併 / AI 摘要**：先上傳單一 PDF
+   - **多檔合併**：直接上傳多個 PDF
+4. 依模式輸入頁碼或上傳檔案
+5. 按下下載按鈕取得結果（多檔合併需先上傳檔案才會顯示按鈕）
 
 ---
 
