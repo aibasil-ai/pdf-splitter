@@ -5,6 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>PDF 智慧切割器 (單檔版)</title>
+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
 
     <!-- 1. 載入 Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -847,7 +848,7 @@
                                 )}
 
                                 {/* Main Action Button */}
-                                {mode !== 'summary' && (mode === 'merge-files' || pdfFile) && (
+                                {mode !== 'summary' && ((mode === 'merge-files' && mergeFiles.length > 0) || (mode !== 'merge-files' && pdfFile)) && (
                                     <button
                                         onClick={mode === 'merge-files' ? handleMergeFiles : mode === 'merge-pages' ? handleMergePages : handleSplit}
                                         disabled={isProcessing || isAiProcessing || (mode === 'merge-files' && mergeFiles.length === 0)}
