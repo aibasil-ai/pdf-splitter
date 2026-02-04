@@ -80,11 +80,13 @@
             const [pdfDoc, setPdfDoc] = useState(null);
             const [pageCount, setPageCount] = useState(0);
             const [mode, setMode] = useState('range');
+            const [mergeFiles, setMergeFiles] = useState([]);
 
             // Inputs
             const [rangeStart, setRangeStart] = useState('');
             const [rangeEnd, setRangeEnd] = useState('');
             const [individualPages, setIndividualPages] = useState('');
+            const [mergePagesInput, setMergePagesInput] = useState('');
             const [userApiKey, setUserApiKey] = useState(defaultApiKey);
             const [showApiKeyInput, setShowApiKeyInput] = useState(false);  // 預設隱藏
 
@@ -98,6 +100,7 @@
             const [aiMsg, setAiMsg] = useState('');
             const [fileName, setFileName] = useState('');
             const [summaryPages, setSummaryPages] = useState(''); // 摘要頁碼輸入
+            const mergeFilesInputRef = useRef(null);
 
             useEffect(() => {
                 // 設定 pdf.js worker
@@ -128,6 +131,36 @@
                 }
             };
 
+            const isPdfFile = (file) => {
+                if (!file) return false;
+                if (file.type === 'application/pdf') return true;
+                return file.name?.toLowerCase().endsWith('.pdf');
+            };
+
+            const handleMergeFilesChange = (e) => {
+                const files = Array.from(e.target.files || []);
+                if (files.length === 0) {
+                    return;
+                }
+
+                const validPdfs = files.filter(isPdfFile);
+                const invalidFiles = files.filter((file) => !isPdfFile(file));
+
+                if (invalidFiles.length > 0) {
+                    setStatusMsg({ type: 'error', text: '包含非 PDF 檔案，已忽略這些檔案。' });
+                } else {
+                    setStatusMsg({ type: '', text: '' });
+                }
+
+                if (validPdfs.length > 0) {
+                    setMergeFiles((prev) => [...prev, ...validPdfs]);
+                }
+
+                if (mergeFilesInputRef.current) {
+                    mergeFilesInputRef.current.value = '';
+                }
+            };
+
             const processFile = async (file) => {
                 try {
                     setIsProcessing(true);
@@ -146,6 +179,7 @@
                     setRangeStart('1');
                     setRangeEnd(loadedDoc.getPageCount().toString());
                     setIndividualPages('');
+                    setMergePagesInput('');
 
                     setIsProcessing(false);
                 } catch (error) {
@@ -153,6 +187,54 @@
                     setStatusMsg({ type: 'error', text: '無法解析 PDF 檔案，檔案可能已損壞或受密碼保護。' });
                     setIsProcessing(false);
                 }
+            };
+
+            const parsePageInput = (input, maxPage) => {
+                const pages = [];
+                const seen = new Set();
+                const invalidTokens = [];
+                const outOfRange = [];
+                const parts = input.split(/[,，\s]+/).filter(p => p.trim());
+
+                for (const part of parts) {
+                    const trimmed = part.trim();
+                    const rangeMatch = trimmed.match(/^(\d+)[-－](\d+)$/);
+
+                    if (rangeMatch) {
+                        const start = parseInt(rangeMatch[1]);
+                        const end = parseInt(rangeMatch[2]);
+
+                        if (isNaN(start) || isNaN(end) || start > end) {
+                            invalidTokens.push(trimmed);
+                            continue;
+                        }
+
+                        for (let i = start; i <= end; i++) {
+                            if (i < 1 || i > maxPage) {
+                                outOfRange.push(i);
+                                continue;
+                            }
+                            if (!seen.has(i)) {
+                                pages.push(i);
+                                seen.add(i);
+                            }
+                        }
+                    } else if (/^\d+$/.test(trimmed)) {
+                        const num = parseInt(trimmed);
+                        if (num < 1 || num > maxPage) {
+                            outOfRange.push(num);
+                            continue;
+                        }
+                        if (!seen.has(num)) {
+                            pages.push(num);
+                            seen.add(num);
+                        }
+                    } else {
+                        invalidTokens.push(trimmed);
+                    }
+                }
+
+                return { pages, invalidTokens, outOfRange };
             };
 
             // 根據指定頁碼陣列提取完整文字（供摘要使用）
@@ -189,40 +271,23 @@
                     return;
                 }
 
-                // 解析摘要頁碼（支援單頁如 "1, 3, 5" 和連續頁如 "1-5, 8-10"）
-                const parsePageInput = (input) => {
-                    const pages = [];
-                    const parts = input.split(/[,，\s]+/).filter(p => p.trim());
-
-                    for (const part of parts) {
-                        const trimmed = part.trim();
-                        // 檢查是否為範圍格式 (e.g., "1-5" 或 "1－5")
-                        const rangeMatch = trimmed.match(/^(\d+)[-－](\d+)$/);
-                        if (rangeMatch) {
-                            const start = parseInt(rangeMatch[1]);
-                            const end = parseInt(rangeMatch[2]);
-                            if (start <= end && start >= 1 && end <= pageCount) {
-                                for (let i = start; i <= end; i++) {
-                                    pages.push(i);
-                                }
-                            }
-                        } else {
-                            // 單頁格式
-                            const num = parseInt(trimmed);
-                            if (!isNaN(num) && num >= 1 && num <= pageCount) {
-                                pages.push(num);
-                            }
-                        }
-                    }
-                    return pages;
-                };
-
-                const pagesToSummarize = parsePageInput(summaryPages);
-                const uniquePages = [...new Set(pagesToSummarize)].sort((a, b) => a - b);
+                const { pages: pagesToSummarize, invalidTokens, outOfRange } = parsePageInput(summaryPages, pageCount);
+                const uniquePages = pagesToSummarize;
 
                 // 檢查是否有輸入頁碼
                 if (uniquePages.length === 0) {
                     setAiMsg('⚠️ 請輸入要摘要的頁碼（例如：1, 3, 5 或 1-5）。');
+                    return;
+                }
+
+                if (invalidTokens.length > 0) {
+                    setAiMsg(`⚠️ 包含無效頁碼格式：${invalidTokens.join(', ')}`);
+                    return;
+                }
+
+                if (outOfRange.length > 0) {
+                    const uniqueOutOfRange = [...new Set(outOfRange)];
+                    setAiMsg(`⚠️ 頁碼超出範圍 (1 - ${pageCount})：${uniqueOutOfRange.join(', ')}`);
                     return;
                 }
 
@@ -260,6 +325,12 @@
                 } finally {
                     setIsAiProcessing(false);
                 }
+            };
+
+            const handleModeChange = (nextMode) => {
+                setMode(nextMode);
+                setAiMsg('');
+                setStatusMsg({ type: '', text: '' });
             };
 
             const handleSplit = async () => {
@@ -343,6 +414,77 @@
                 }
             };
 
+            const handleMergeFiles = async () => {
+                if (!window.PDFLib) return;
+                if (mergeFiles.length === 0) {
+                    setStatusMsg({ type: 'error', text: '請先上傳要合併的 PDF 檔案。' });
+                    return;
+                }
+
+                setIsProcessing(true);
+                setStatusMsg({ type: '', text: '' });
+
+                try {
+                    const { PDFDocument } = window.PDFLib;
+                    const mergedPdf = await PDFDocument.create();
+
+                    for (const file of mergeFiles) {
+                        if (!isPdfFile(file)) {
+                            throw new Error('檔案清單中包含非 PDF 檔案，請重新選取。');
+                        }
+                        const bytes = await file.arrayBuffer();
+                        const donorPdf = await PDFDocument.load(bytes);
+                        const copiedPages = await mergedPdf.copyPages(donorPdf, donorPdf.getPageIndices());
+                        copiedPages.forEach(page => mergedPdf.addPage(page));
+                    }
+
+                    const pdfBytes = await mergedPdf.save();
+                    downloadBlob(pdfBytes, `merged_${mergeFiles.length}_files.pdf`, 'application/pdf');
+                    setStatusMsg({ type: 'success', text: `合併完成！已下載 ${mergeFiles.length} 份檔案的合併 PDF。` });
+                } catch (err) {
+                    setStatusMsg({ type: 'error', text: err.message || '合併失敗，請稍後再試。' });
+                } finally {
+                    setIsProcessing(false);
+                }
+            };
+
+            const handleMergePages = async () => {
+                if (!pdfDoc || !window.PDFLib) return;
+
+                setIsProcessing(true);
+                setStatusMsg({ type: '', text: '' });
+
+                try {
+                    const { pages, invalidTokens, outOfRange } = parsePageInput(mergePagesInput, pageCount);
+
+                    if (pages.length === 0) {
+                        throw new Error('請輸入有效的頁碼（例如：1, 3, 5 或 1-5）。');
+                    }
+                    if (invalidTokens.length > 0) {
+                        throw new Error(`包含無效頁碼格式：${invalidTokens.join(', ')}`);
+                    }
+                    if (outOfRange.length > 0) {
+                        const uniqueOutOfRange = [...new Set(outOfRange)];
+                        throw new Error(`頁碼超出範圍 (1 - ${pageCount})：${uniqueOutOfRange.join(', ')}`);
+                    }
+
+                    const { PDFDocument } = window.PDFLib;
+                    const mergedPdf = await PDFDocument.create();
+                    const pageIndices = pages.map((page) => page - 1);
+                    const copiedPages = await mergedPdf.copyPages(pdfDoc, pageIndices);
+                    copiedPages.forEach(page => mergedPdf.addPage(page));
+
+                    const pdfBytes = await mergedPdf.save();
+                    const outputName = fileName ? `merged_pages_${fileName}` : 'merged_pages.pdf';
+                    downloadBlob(pdfBytes, outputName, 'application/pdf');
+                    setStatusMsg({ type: 'success', text: `成功合併 ${pages.length} 頁！檔案已下載。` });
+                } catch (err) {
+                    setStatusMsg({ type: 'error', text: err.message || '合併失敗，請稍後再試。' });
+                } finally {
+                    setIsProcessing(false);
+                }
+            };
+
             const downloadBlob = (data, name, mimeType) => {
                 const blob = new Blob([data], { type: mimeType });
                 const url = window.URL.createObjectURL(blob);
@@ -362,6 +504,12 @@
                 setFileName('');
                 setStatusMsg({ type: '', text: '' });
                 setAiMsg('');
+                setRangeStart('');
+                setRangeEnd('');
+                setIndividualPages('');
+                setSummaryPages('');
+                setMergePagesInput('');
+                setMergeFiles([]);
             };
 
             if (!isReady) {
@@ -442,213 +590,290 @@
                         )}
 
                         <div className="p-6 md:p-8">
-                            {/* Step 1: Upload */}
-                            {!pdfFile ? (
-                                <div className="border-2 border-dashed border-slate-300 rounded-xl p-12 text-center hover:border-indigo-400 transition-colors bg-slate-50 relative group cursor-pointer">
-                                    <input
-                                        type="file"
-                                        accept="application/pdf"
-                                        onChange={handleFileChange}
-                                        className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                                    />
-                                    <div className="flex flex-col items-center gap-4 pointer-events-none">
-                                        <div className="w-16 h-16 bg-indigo-100 text-indigo-600 rounded-full flex items-center justify-center group-hover:scale-110 transition-transform">
-                                            <Upload className="w-8 h-8" />
-                                        </div>
-                                        <div>
-                                            <p className="text-lg font-medium text-slate-700">點擊或拖放 PDF 檔案至此</p>
-                                            <p className="text-slate-400 text-sm mt-1">支援任何大小的 PDF 文件</p>
-                                        </div>
-                                    </div>
-                                </div>
-                            ) : (
-                                /* Step 2: Split Controls */
-                                <div className="space-y-8 animate-fadeIn">
-                                    {/* File Info */}
-                                    <div className="bg-slate-50 rounded-lg p-4 flex items-start md:items-center justify-between gap-4 border border-slate-200">
-                                        <div className="flex items-center gap-4">
-                                            <div className="w-12 h-12 bg-red-100 text-red-600 rounded-lg flex items-center justify-center shrink-0">
-                                                <FileText className="w-6 h-6" />
-                                            </div>
-                                            <div>
-                                                <h3 className="font-medium text-slate-800 break-all">{fileName}</h3>
-                                                <p className="text-slate-500 text-sm flex items-center gap-2">
-                                                    <Layers className="w-4 h-4" />
-                                                    總頁數: <span className="font-bold text-slate-700">{pageCount}</span>
-                                                </p>
-                                            </div>
-                                        </div>
-                                        <button onClick={reset} className="text-sm text-slate-400 hover:text-red-500 shrink-0 underline">
-                                            更換檔案
-                                        </button>
-                                    </div>
-
-                                    {/* Mode Selection Tabs */}
-                                    <div>
-                                        <div className="flex border-b border-slate-200 mb-6">
-                                            <button
-                                                className={`pb-3 px-4 font-medium transition-colors flex items-center gap-2 ${mode === 'range' ? 'text-indigo-600 border-b-2 border-indigo-600' : 'text-slate-400 hover:text-slate-600'}`}
-                                                onClick={() => { setMode('range'); setAiMsg(''); }}
-                                            >
-                                                <Layers className="w-4 h-4" />
-                                                範圍切割
-                                            </button>
-                                            <button
-                                                className={`pb-3 px-4 font-medium transition-colors flex items-center gap-2 ${mode === 'individual' ? 'text-indigo-600 border-b-2 border-indigo-600' : 'text-slate-400 hover:text-slate-600'}`}
-                                                onClick={() => { setMode('individual'); setAiMsg(''); }}
-                                            >
-                                                <FileStack className="w-4 h-4" />
-                                                獨立頁面
-                                            </button>
-                                            <button
-                                                className={`pb-3 px-4 font-medium transition-colors flex items-center gap-2 ${mode === 'summary' ? 'text-purple-600 border-b-2 border-purple-600' : 'text-slate-400 hover:text-slate-600'}`}
-                                                onClick={() => { setMode('summary'); setAiMsg(''); }}
-                                            >
-                                                <Bot className="w-4 h-4" />
-                                                AI 摘要
-                                            </button>
-                                        </div>
-
-                                        {/* Input Area */}
-                                        <div className="bg-white p-1">
-                                            {mode === 'range' ? (
-                                                <div className="space-y-4 animate-fadeIn">
-                                                    <p className="text-slate-600 text-sm">提取連續頁面為單一檔案。</p>
-
-                                                    <div className="flex items-center gap-4">
-                                                        <div className="flex-1">
-                                                            <label className="block text-sm font-medium text-slate-700 mb-1">起始頁</label>
-                                                            <input
-                                                                type="number"
-                                                                min="1"
-                                                                max={pageCount}
-                                                                value={rangeStart}
-                                                                onChange={(e) => setRangeStart(e.target.value)}
-                                                                className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all"
-                                                                placeholder="1"
-                                                            />
-                                                        </div>
-                                                        <span className="text-slate-400 mt-6">至</span>
-                                                        <div className="flex-1">
-                                                            <label className="block text-sm font-medium text-slate-700 mb-1">結束頁</label>
-                                                            <input
-                                                                type="number"
-                                                                min="1"
-                                                                max={pageCount}
-                                                                value={rangeEnd}
-                                                                onChange={(e) => setRangeEnd(e.target.value)}
-                                                                className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all"
-                                                                placeholder={pageCount}
-                                                            />
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                            ) : mode === 'individual' ? (
-                                                <div className="space-y-4 animate-fadeIn">
-                                                    <p className="text-slate-600 text-sm">將輸入的頁碼<b>分別切割</b>並打包下載。</p>
-
-                                                    <div>
-                                                        <label className="block text-sm font-medium text-slate-700 mb-1">頁碼 (以逗號分隔)</label>
-                                                        <input
-                                                            type="text"
-                                                            value={individualPages}
-                                                            onChange={(e) => setIndividualPages(e.target.value)}
-                                                            className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all"
-                                                            placeholder="例如: 1, 3, 5, 8"
-                                                        />
-                                                    </div>
-                                                </div>
-                                            ) : (
-                                                <div className="space-y-4 animate-fadeIn">
-                                                    <p className="text-slate-600 text-sm">輸入要摘要的頁碼，AI 將提取<b>完整內容</b>進行摘要。</p>
-
-                                                    <div>
-                                                        <label className="block text-sm font-medium text-slate-700 mb-1">摘要頁碼 (最多 10 頁)</label>
-                                                        <input
-                                                            type="text"
-                                                            value={summaryPages}
-                                                            onChange={(e) => setSummaryPages(e.target.value)}
-                                                            className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-purple-500 outline-none transition-all"
-                                                            placeholder="例如: 1-5, 8, 10-12（支援單頁與連續頁）"
-                                                        />
-                                                        <p className="text-[10px] text-slate-400 mt-1">支援 "1, 3, 5"(單頁) 或 "1-5"(連續頁) 格式</p>
-                                                    </div>
-
-                                                    <button
-                                                        onClick={handleAiSummarize}
-                                                        disabled={isAiProcessing || !summaryPages}
-                                                        className="w-full py-3 rounded-lg text-white font-bold flex items-center justify-center gap-2 transition-all bg-purple-600 hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                                                    >
-                                                        {isAiProcessing ? (
-                                                            <>
-                                                                <Loader2 className="w-5 h-5 animate-spin" />
-                                                                摘要中...
-                                                            </>
-                                                        ) : (
-                                                            <>
-                                                                <Sparkles className="w-5 h-5" />
-                                                                執行 AI 摘要
-                                                            </>
-                                                        )}
-                                                    </button>
-                                                </div>
-                                            )}
-                                        </div>
-                                    </div>
-
-                                    {/* AI Message Area */}
-                                    {(isAiProcessing || aiMsg) && (
-                                        <div className={`p-4 rounded-lg border ${isAiProcessing ? 'bg-purple-50 border-purple-100' : 'bg-slate-50 border-slate-200'} animate-fadeIn`}>
-                                            <div className="flex items-start gap-3">
-                                                {isAiProcessing ? <Loader2 className="w-5 h-5 text-purple-600 animate-spin mt-0.5" /> : <MessageSquare className="w-5 h-5 text-purple-600 mt-0.5" />}
-                                                <div className="flex-1">
-                                                    {isAiProcessing ? (
-                                                        <p className="text-sm text-purple-700 font-medium">{aiMsg}</p>
-                                                    ) : (
-                                                        <div className="text-sm text-slate-700 whitespace-pre-wrap font-medium leading-relaxed">
-                                                            <span className="text-purple-700 font-bold block mb-1">Gemini AI 回應：</span>
-                                                            {aiMsg}
-                                                        </div>
-                                                    )}
-                                                </div>
-                                            </div>
-                                        </div>
-                                    )}
-
-                                    {/* Status Messages */}
-                                    {statusMsg.text && (
-                                        <div className={`p-4 rounded-lg flex items-center gap-3 ${statusMsg.type === 'error' ? 'bg-red-50 text-red-700 border border-red-100' : 'bg-green-50 text-green-700 border border-green-100'} animate-fadeIn`}>
-                                            {statusMsg.type === 'error' ? <AlertCircle className="w-5 h-5 shrink-0" /> : <CheckCircle className="w-5 h-5 shrink-0" />}
-                                            <span className="text-sm font-medium">{statusMsg.text}</span>
-                                        </div>
-                                    )}
-
-                                    {/* Main Action Button - 只在切割模式下顯示 */}
-                                    {mode !== 'summary' && (
+                            <div className="space-y-8 animate-fadeIn">
+                                {/* Mode Selection Tabs */}
+                                <div>
+                                    <div className="flex flex-wrap border-b border-slate-200 mb-6">
                                         <button
-                                            onClick={handleSplit}
-                                            disabled={isProcessing || isAiProcessing}
-                                            className={`w-full py-4 rounded-xl text-white font-bold text-lg shadow-lg flex items-center justify-center gap-3 transition-all transform active:scale-[0.98]
-                                                ${isProcessing || isAiProcessing
-                                                    ? 'bg-slate-400 cursor-not-allowed'
-                                                    : 'bg-indigo-600 hover:bg-indigo-700 hover:shadow-indigo-200'
-                                                }`}
+                                            className={`pb-3 px-4 font-medium transition-colors flex items-center gap-2 ${mode === 'range' ? 'text-indigo-600 border-b-2 border-indigo-600' : 'text-slate-400 hover:text-slate-600'}`}
+                                            onClick={() => handleModeChange('range')}
                                         >
-                                            {isProcessing ? (
-                                                <>
-                                                    <Loader2 className="w-6 h-6 animate-spin" />
-                                                    處理中...
-                                                </>
-                                            ) : (
-                                                <>
-                                                    <Download className="w-6 h-6" />
-                                                    {mode === 'range' ? '下載切割後的 PDF' : '下載獨立頁面 (ZIP)'}
-                                                </>
-                                            )}
+                                            <Layers className="w-4 h-4" />
+                                            範圍切割
                                         </button>
+                                        <button
+                                            className={`pb-3 px-4 font-medium transition-colors flex items-center gap-2 ${mode === 'individual' ? 'text-indigo-600 border-b-2 border-indigo-600' : 'text-slate-400 hover:text-slate-600'}`}
+                                            onClick={() => handleModeChange('individual')}
+                                        >
+                                            <Scissors className="w-4 h-4" />
+                                            獨立頁面
+                                        </button>
+                                        <button
+                                            className={`pb-3 px-4 font-medium transition-colors flex items-center gap-2 ${mode === 'merge-pages' ? 'text-indigo-600 border-b-2 border-indigo-600' : 'text-slate-400 hover:text-slate-600'}`}
+                                            onClick={() => handleModeChange('merge-pages')}
+                                        >
+                                            <FileText className="w-4 h-4" />
+                                            選頁合併
+                                        </button>
+                                        <button
+                                            className={`pb-3 px-4 font-medium transition-colors flex items-center gap-2 ${mode === 'merge-files' ? 'text-indigo-600 border-b-2 border-indigo-600' : 'text-slate-400 hover:text-slate-600'}`}
+                                            onClick={() => handleModeChange('merge-files')}
+                                        >
+                                            <FileStack className="w-4 h-4" />
+                                            多檔合併
+                                        </button>
+                                        <button
+                                            className={`pb-3 px-4 font-medium transition-colors flex items-center gap-2 ${mode === 'summary' ? 'text-purple-600 border-b-2 border-purple-600' : 'text-slate-400 hover:text-slate-600'}`}
+                                            onClick={() => handleModeChange('summary')}
+                                        >
+                                            <Bot className="w-4 h-4" />
+                                            AI 摘要
+                                        </button>
+                                    </div>
+
+                                    {mode !== 'merge-files' && pdfFile && (
+                                        <div className="bg-slate-50 rounded-lg p-4 flex items-start md:items-center justify-between gap-4 border border-slate-200 mb-6">
+                                            <div className="flex items-center gap-4">
+                                                <div className="w-12 h-12 bg-red-100 text-red-600 rounded-lg flex items-center justify-center shrink-0">
+                                                    <FileText className="w-6 h-6" />
+                                                </div>
+                                                <div>
+                                                    <h3 className="font-medium text-slate-800 break-all">{fileName}</h3>
+                                                    <p className="text-slate-500 text-sm flex items-center gap-2">
+                                                        <Layers className="w-4 h-4" />
+                                                        總頁數: <span className="font-bold text-slate-700">{pageCount}</span>
+                                                    </p>
+                                                </div>
+                                            </div>
+                                            <button onClick={reset} className="text-sm text-slate-400 hover:text-red-500 shrink-0 underline">
+                                                更換檔案
+                                            </button>
+                                        </div>
                                     )}
+
+                                    {/* Input Area */}
+                                    <div className="bg-white p-1">
+                                        {mode === 'merge-files' ? (
+                                            <div className="space-y-4 animate-fadeIn">
+                                                <p className="text-slate-600 text-sm">一次上傳多個 PDF，依上傳順序合併為單一檔案。</p>
+                                                <div className="border-2 border-dashed border-slate-300 rounded-xl p-10 text-center hover:border-indigo-400 transition-colors bg-slate-50 relative group cursor-pointer">
+                                                    <input
+                                                        ref={mergeFilesInputRef}
+                                                        type="file"
+                                                        accept="application/pdf"
+                                                        multiple
+                                                        onChange={handleMergeFilesChange}
+                                                        className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                                                    />
+                                                    <div className="flex flex-col items-center gap-4 pointer-events-none">
+                                                        <div className="w-16 h-16 bg-indigo-100 text-indigo-600 rounded-full flex items-center justify-center group-hover:scale-110 transition-transform">
+                                                            <Upload className="w-8 h-8" />
+                                                        </div>
+                                                        <div>
+                                                            <p className="text-lg font-medium text-slate-700">點擊或拖放多個 PDF 檔案至此</p>
+                                                            <p className="text-slate-400 text-sm mt-1">可重複上傳，後上傳的檔案會接在後面</p>
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                {mergeFiles.length > 0 && (
+                                                    <div className="bg-slate-50 rounded-lg p-4 border border-slate-200">
+                                                        <div className="flex items-center justify-between mb-3">
+                                                            <p className="text-sm font-medium text-slate-700">
+                                                                已選取 {mergeFiles.length} 個檔案（合併順序如下）
+                                                            </p>
+                                                            <button
+                                                                onClick={() => setMergeFiles([])}
+                                                                className="text-xs text-slate-400 hover:text-red-500 underline"
+                                                            >
+                                                                清空
+                                                            </button>
+                                                        </div>
+                                                        <ul className="space-y-2 text-sm text-slate-600">
+                                                            {mergeFiles.map((file, index) => (
+                                                                <li key={`${file.name}-${index}`} className="flex items-center gap-2">
+                                                                    <span className="text-slate-400">#{index + 1}</span>
+                                                                    <span className="truncate">{file.name}</span>
+                                                                </li>
+                                                            ))}
+                                                        </ul>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        ) : !pdfFile ? (
+                                            <div className="border-2 border-dashed border-slate-300 rounded-xl p-12 text-center hover:border-indigo-400 transition-colors bg-slate-50 relative group cursor-pointer">
+                                                <input
+                                                    type="file"
+                                                    accept="application/pdf"
+                                                    onChange={handleFileChange}
+                                                    className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                                                />
+                                                <div className="flex flex-col items-center gap-4 pointer-events-none">
+                                                    <div className="w-16 h-16 bg-indigo-100 text-indigo-600 rounded-full flex items-center justify-center group-hover:scale-110 transition-transform">
+                                                        <Upload className="w-8 h-8" />
+                                                    </div>
+                                                    <div>
+                                                        <p className="text-lg font-medium text-slate-700">點擊或拖放 PDF 檔案至此</p>
+                                                        <p className="text-slate-400 text-sm mt-1">支援任何大小的 PDF 文件</p>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        ) : mode === 'range' ? (
+                                            <div className="space-y-4 animate-fadeIn">
+                                                <p className="text-slate-600 text-sm">提取連續頁面為單一檔案。</p>
+
+                                                <div className="flex items-center gap-4">
+                                                    <div className="flex-1">
+                                                        <label className="block text-sm font-medium text-slate-700 mb-1">起始頁</label>
+                                                        <input
+                                                            type="number"
+                                                            min="1"
+                                                            max={pageCount}
+                                                            value={rangeStart}
+                                                            onChange={(e) => setRangeStart(e.target.value)}
+                                                            className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all"
+                                                            placeholder="1"
+                                                        />
+                                                    </div>
+                                                    <span className="text-slate-400 mt-6">至</span>
+                                                    <div className="flex-1">
+                                                        <label className="block text-sm font-medium text-slate-700 mb-1">結束頁</label>
+                                                        <input
+                                                            type="number"
+                                                            min="1"
+                                                            max={pageCount}
+                                                            value={rangeEnd}
+                                                            onChange={(e) => setRangeEnd(e.target.value)}
+                                                            className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all"
+                                                            placeholder={pageCount}
+                                                        />
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        ) : mode === 'individual' ? (
+                                            <div className="space-y-4 animate-fadeIn">
+                                                <p className="text-slate-600 text-sm">將輸入的頁碼<b>分別切割</b>並打包下載。</p>
+
+                                                <div>
+                                                    <label className="block text-sm font-medium text-slate-700 mb-1">頁碼 (以逗號分隔)</label>
+                                                    <input
+                                                        type="text"
+                                                        value={individualPages}
+                                                        onChange={(e) => setIndividualPages(e.target.value)}
+                                                        className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all"
+                                                        placeholder="例如: 1, 3, 5, 8"
+                                                    />
+                                                </div>
+                                            </div>
+                                        ) : mode === 'merge-pages' ? (
+                                            <div className="space-y-4 animate-fadeIn">
+                                                <p className="text-slate-600 text-sm">輸入要合併的頁碼，輸出單一 PDF。</p>
+
+                                                <div>
+                                                    <label className="block text-sm font-medium text-slate-700 mb-1">合併頁碼 (支援單頁與連續頁)</label>
+                                                    <input
+                                                        type="text"
+                                                        value={mergePagesInput}
+                                                        onChange={(e) => setMergePagesInput(e.target.value)}
+                                                        className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all"
+                                                        placeholder="例如: 1, 3, 5, 8 或 1-5, 8-10"
+                                                    />
+                                                    <p className="text-[10px] text-slate-400 mt-1">輸出順序依輸入順序，重複頁碼會自動去除</p>
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <div className="space-y-4 animate-fadeIn">
+                                                <p className="text-slate-600 text-sm">輸入要摘要的頁碼，AI 將提取<b>完整內容</b>進行摘要。</p>
+
+                                                <div>
+                                                    <label className="block text-sm font-medium text-slate-700 mb-1">摘要頁碼 (最多 10 頁)</label>
+                                                    <input
+                                                        type="text"
+                                                        value={summaryPages}
+                                                        onChange={(e) => setSummaryPages(e.target.value)}
+                                                        className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-purple-500 outline-none transition-all"
+                                                        placeholder="例如: 1-5, 8, 10-12（支援單頁與連續頁）"
+                                                    />
+                                                    <p className="text-[10px] text-slate-400 mt-1">支援 "1, 3, 5"(單頁) 或 "1-5"(連續頁) 格式</p>
+                                                </div>
+
+                                                <button
+                                                    onClick={handleAiSummarize}
+                                                    disabled={isAiProcessing || !summaryPages}
+                                                    className="w-full py-3 rounded-lg text-white font-bold flex items-center justify-center gap-2 transition-all bg-purple-600 hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                                                >
+                                                    {isAiProcessing ? (
+                                                        <>
+                                                            <Loader2 className="w-5 h-5 animate-spin" />
+                                                            摘要中...
+                                                        </>
+                                                    ) : (
+                                                        <>
+                                                            <Sparkles className="w-5 h-5" />
+                                                            執行 AI 摘要
+                                                        </>
+                                                    )}
+                                                </button>
+                                            </div>
+                                        )}
+                                    </div>
                                 </div>
-                            )}
+
+                                {/* AI Message Area */}
+                                {(isAiProcessing || aiMsg) && mode === 'summary' && (
+                                    <div className={`p-4 rounded-lg border ${isAiProcessing ? 'bg-purple-50 border-purple-100' : 'bg-slate-50 border-slate-200'} animate-fadeIn`}>
+                                        <div className="flex items-start gap-3">
+                                            {isAiProcessing ? <Loader2 className="w-5 h-5 text-purple-600 animate-spin mt-0.5" /> : <MessageSquare className="w-5 h-5 text-purple-600 mt-0.5" />}
+                                            <div className="flex-1">
+                                                {isAiProcessing ? (
+                                                    <p className="text-sm text-purple-700 font-medium">{aiMsg}</p>
+                                                ) : (
+                                                    <div className="text-sm text-slate-700 whitespace-pre-wrap font-medium leading-relaxed">
+                                                        <span className="text-purple-700 font-bold block mb-1">Gemini AI 回應：</span>
+                                                        {aiMsg}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* Status Messages */}
+                                {statusMsg.text && (
+                                    <div className={`p-4 rounded-lg flex items-center gap-3 ${statusMsg.type === 'error' ? 'bg-red-50 text-red-700 border border-red-100' : 'bg-green-50 text-green-700 border border-green-100'} animate-fadeIn`}>
+                                        {statusMsg.type === 'error' ? <AlertCircle className="w-5 h-5 shrink-0" /> : <CheckCircle className="w-5 h-5 shrink-0" />}
+                                        <span className="text-sm font-medium">{statusMsg.text}</span>
+                                    </div>
+                                )}
+
+                                {/* Main Action Button */}
+                                {mode !== 'summary' && (mode === 'merge-files' || pdfFile) && (
+                                    <button
+                                        onClick={mode === 'merge-files' ? handleMergeFiles : mode === 'merge-pages' ? handleMergePages : handleSplit}
+                                        disabled={isProcessing || isAiProcessing || (mode === 'merge-files' && mergeFiles.length === 0)}
+                                        className={`w-full py-4 rounded-xl text-white font-bold text-lg shadow-lg flex items-center justify-center gap-3 transition-all transform active:scale-[0.98]
+                                            ${isProcessing || isAiProcessing || (mode === 'merge-files' && mergeFiles.length === 0)
+                                                ? 'bg-slate-400 cursor-not-allowed'
+                                                : 'bg-indigo-600 hover:bg-indigo-700 hover:shadow-indigo-200'
+                                            }`}
+                                    >
+                                        {isProcessing ? (
+                                            <>
+                                                <Loader2 className="w-6 h-6 animate-spin" />
+                                                處理中...
+                                            </>
+                                        ) : (
+                                            <>
+                                                <Download className="w-6 h-6" />
+                                                {mode === 'range' && '下載切割後的 PDF'}
+                                                {mode === 'individual' && '下載獨立頁面 (ZIP)'}
+                                                {mode === 'merge-pages' && '下載合併後的 PDF'}
+                                                {mode === 'merge-files' && '下載合併後的 PDF'}
+                                            </>
+                                        )}
+                                    </button>
+                                )}
+                            </div>
                         </div>
 
                         <div className="bg-slate-50 p-4 text-center border-t border-slate-100">
